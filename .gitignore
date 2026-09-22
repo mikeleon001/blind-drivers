@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# CARLA (installed separately, not committed)
+CARLA_*/
+*.carla
+carla-simulator/
+
+# Datasets / recordings / model checkpoints (large files — do not commit)
+data/
+datasets/
+recordings/
+*.mp4
+*.avi
+checkpoints/
+*.pth
+*.pt
+*.h5
+*.onnx
+
+# Logs and evaluation outputs
+logs/
+results/
+*.log
+*.csv
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp

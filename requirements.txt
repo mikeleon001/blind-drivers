@@ -1,0 +1,14 @@
+# Core
+numpy
+opencv-python
+
+# Deep learning (stretch-goal CNN perception component)
+torch
+torchvision
+
+# Plotting / evaluation
+matplotlib
+pandas
+
+# CARLA Python API is installed separately alongside the CARLA simulator itself;
+# see https://carla.readthedocs.io/en/latest/start_quickstart/
