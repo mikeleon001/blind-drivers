@@ -1,4 +1,4 @@
-# Blind Drivers — Vision-Based Lane Detection and Lane-Keeping Assistance
+# Blind Drivers - Vision-Based Lane Detection and Lane-Keeping Assistance
 
 CS 5230 (Connected & Autonomous Vehicles) final project. We're building and evaluating a
 vision-based lane detection and lane-keeping control system in the CARLA simulator, with a
