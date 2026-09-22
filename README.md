@@ -17,10 +17,10 @@ background, goals, methodology, and references.
 
 The system has three main pieces:
 
-- **Simulation** — CARLA environment setup, scenarios, and data collection.
-- **Perception** — lane detection (classical computer vision, with a CNN-based approach as a
+- **Simulation** - CARLA environment setup, scenarios, and data collection.
+- **Perception** - lane detection (classical computer vision, with a CNN-based approach as a
   stretch goal).
-- **Control** — a PID/geometric controller that uses detected lane geometry to keep the vehicle
+- **Control** - a PID/geometric controller that uses detected lane geometry to keep the vehicle
   centered in its lane.
 
 Performance is assessed via lateral deviation from lane center, correction responsiveness, and
@@ -41,19 +41,19 @@ docs/           Proposal, reference papers, meeting notes
 
 ### Requirements
 
-- CARLA (version TBD — confirm with the team)
+- CARLA (version TBD - confirm with the team)
 - Python 3.x
 - See `requirements.txt` for Python package dependencies
 
 ### Setup
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/mikeleon001/blind-drivers.git
 cd blind-drivers
 pip install -r requirements.txt
 ```
 
-CARLA itself is not included in this repo (it's a large separate install) — see
+CARLA itself is not included in this repo (it's a large separate install) - see
 [CARLA's Quick Start guide](https://carla.readthedocs.io/en/latest/start_quickstart/) to install it.
 
 ## References
