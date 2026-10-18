@@ -4,10 +4,10 @@ PID controller for lane-keeping steering correction.
 
 ## Files
 
-- `pid.py` — `PIDController`: generic PID controller. Takes an error signal (lateral
+- `pid.py` - `PIDController`: generic PID controller. Takes an error signal (lateral
   offset or heading error) and `dt`, returns a correction output. Decoupled from CARLA
   so it can be written and tuned now, before perception exists.
-- `synthetic_test.py` — closed-loop smoke test: a simple synthetic 1D vehicle model
+- `synthetic_test.py` - closed-loop smoke test: a simple synthetic 1D vehicle model
   with a constant disturbance (simulating a curve/crosswind), controlled by the PID,
   to prove the controller actually stabilizes a drifting signal before it's wired to
   CARLA or real lane detection output.
@@ -39,7 +39,7 @@ history would otherwise produce a bad correction when detection resumes).
 ## Notes
 
 - Gains (`kp=1.2, ki=0.3, kd=0.1`) are untuned placeholders that happen to converge on
-  the synthetic disturbance model in `synthetic_test.py` -- real tuning needs real
+  the synthetic disturbance model in `synthetic_test.py` - real tuning needs real
   CARLA runs once lane detection is feeding actual `lateral_offset`/`heading_error`.
 - `output_limits` and `integral_limits` exist to prevent output saturation and integral
   windup, which matter more once this is driving an actual steering command.
