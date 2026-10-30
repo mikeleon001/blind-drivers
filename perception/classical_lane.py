@@ -48,7 +48,9 @@ class ClassicalLaneDetector:
                  paint_contrast=35, paint_kernel_m=0.65,
                  yellow_h=(18, 38), yellow_s_min=90, yellow_v_min=90,
                  fit_degree=2, max_abs_offset=2.5, max_abs_heading=0.6,
-                 inlier_tol=0.12):
+                 inlier_tol=0.12, width_tol=0.6, near_fit_max=16.0,
+                 track_gate=0.5, track_max_gap=10, track_confirm=10,
+                 lane_model=True, model_xmax=15.0):
         self.W, self.H = img_w, img_h
         self.f = img_w / (2.0 * math.tan(math.radians(fov_deg) / 2.0))
         self.cx, self.cy = img_w / 2.0, img_h / 2.0
@@ -62,6 +64,14 @@ class ClassicalLaneDetector:
         self.deg = fit_degree
         self.max_abs_offset, self.max_abs_heading = max_abs_offset, max_abs_heading
         self.inlier_tol = inlier_tol
+        self.near_fit_max = near_fit_max   # offset/heading come from the line nearer than this (m)
+        self.track_gate, self.track_max_gap, self.track_confirm = track_gate, track_max_gap, track_confirm
+        self.lane_model, self.model_xmax = lane_model, model_xmax
+        self._m_prev = None                              # last (a, b) of the lane-model fit
+        self._support = (0, 0)
+        self._conf = 0                                   # consecutive steady frames seen
+        self._track, self._since_track = None, 0        # last (left, right) edge positions at the car
+        self.width_tol = width_tol      # a chosen pair must be within this of the lane width seen so far
 
         # Bird's-eye image: columns = lateral Y (left -> right), rows = forward X (far -> near).
         self.bev_w = int(round(2 * y_half / res))
@@ -153,33 +163,196 @@ class ClassicalLaneDetector:
                 coeffs = c
                 inl = np.abs(y - np.polyval(c, x)) < self.inlier_tol
             if coeffs is not None and inl.sum() >= self.min_pixels:
+                # Offset and heading are about the road NEXT to the car. A curve fitted over the
+                # whole 5-25 m and then extended back to the car lets the bend far ahead push the
+                # near position by 0.4 m or more, so use a straight fit of the near part only.
+                near = x[inl] <= self.near_fit_max
+                span = np.ptp(x[inl][near]) if near.any() else 0.0
+                if near.sum() >= 30 and span >= 4.0:
+                    c1 = np.polyfit(x[inl][near], y[inl][near], 2 if span >= 10.0 else 1)
+                    coeffs = np.concatenate([np.zeros(self.deg + 1 - len(c1)), c1])
                 lines.append((coeffs, x[inl], y[inl]))
             x, y = x[~inl], y[~inl]
             if not inl.any():
                 break
         return lines
 
+    def _model_lines(self, x, y):
+        """Fit the whole lane at once: centre c(x) = a + b x + k x^2, edges c -/+ W/2, sharing one
+        shape. A solid line on one side supports a dashed (or missing) line on the other, and a
+        far-away junk line cannot win by itself. Near field only (x <= model_xmax): offset and
+        heading are about the road next to the car, and a bend far ahead must not bend the fit.
+        Returns [left_edge_poly, right_edge_poly] (np.polyval order) or []."""
+        sel = x <= self.model_xmax
+        xs, ys = x[sel], y[sel]
+        if len(xs) > 1500:                                    # plenty to vote with; keeps it fast
+            st = len(xs) // 1500 + 1
+            xs, ys = xs[::st], ys[::st]
+        if len(xs) < self.min_pixels:
+            self._since_track += 1
+            return []
+        a_grid = np.arange(-2.0, 2.0 + 1e-9, 0.1)
+        tracking = (self._m_prev is not None and self._since_track <= self.track_max_gap
+                    and self._conf >= self.track_confirm)
+        if tracking:
+            a_grid = a_grid[np.abs(a_grid - self._m_prev[0]) <= self.track_gate]
+            if len(a_grid) == 0:
+                self._since_track += 1
+                return []
+        W0 = self.width_est
+        pa_ref, pa_pen = (self._m_prev[0], 150.0) if tracking else (0.0, 0.0)   # while following, prefer answers near the last one
+
+        def search(a_grid, bs, ks, bw, dWs=(0.0, -0.3, 0.3)):
+            """Best (score, (a, b, k, W)). Edges are parallel curves a normal distance W/2 from the
+            centre c(x) = a + b x + k x^2, so sideways they sit (W/2)*sqrt(1 + c'(x)^2) away: wider
+            than W/2 where the road is steep in the image. Each paint point votes for the centre
+            offset 'a' it would imply as a left edge and as a right edge; the best 'a' wins."""
+            off0 = 12.0
+            nb = int(2 * off0 / bw) + 1
+            best = (0, None)
+            allc = []
+            for b in bs:
+                for k in ks:
+                    r = ys - (b * xs + k * xs * xs)
+                    g = np.sqrt(1.0 + (b + 2.0 * k * xs) ** 2)
+                    for dW in dWs:
+                        Wc = W0 + dW
+                        hl = np.bincount(np.clip(((r + 0.5 * Wc * g + off0) / bw).astype(int), 0, nb - 1), minlength=nb)
+                        hr = np.bincount(np.clip(((r - 0.5 * Wc * g + off0) / bw).astype(int), 0, nb - 1), minlength=nb)
+                        hs = hl[:-1] + hl[1:] + hr[:-1] + hr[1:]
+                        ia = np.clip(np.round((a_grid + off0) / bw - 0.5).astype(int), 0, nb - 2)
+                        sc = hs[ia] - (25 if dW else 0) - 50.0 * abs(b) - 200.0 * abs(k) - pa_pen * np.abs(a_grid - pa_ref)
+                        j = int(sc.argmax())
+                        if sc[j] > best[0]:
+                            best = (int(sc[j]), (a_grid[j], b, k, Wc))
+                        allc.append((int(sc[j]), (a_grid[j], b, k, Wc)))
+            search.allc = allc
+            return best
+
+        # Stage 1: coarse over every shape up to a tight bend (k = 1/(2R): 0.04 is R = 12 m);
+        # stage 2: fine around the winner. The least-squares step below then polishes it.
+        search(a_grid, np.arange(-0.4, 0.4001, 0.04), np.arange(-0.04, 0.0401, 0.008), 0.1, (0.0,))
+        cands = sorted(search.allc, key=lambda t: -t[0])[:2]
+        best = (0, None)
+        for _, (_, b0, k0, _) in cands:
+            r = search(a_grid, np.arange(b0 - 0.04, b0 + 0.0401, 0.01),
+                       np.arange(k0 - 0.008, k0 + 0.0081, 0.002), 0.1)
+            if r[0] > best[0]:
+                best = r
+        if best[1] is None or best[0] < self.min_pixels:
+            self._since_track += 1
+            return []
+        a, b, k, Wc = best[1]
+        a_grid_best = a
+        for _ in range(3):                                   # least-squares refinement on inliers
+            c = a + b * xs + k * xs * xs
+            g = np.sqrt(1.0 + (b + 2.0 * k * xs) ** 2)
+            inl_l = np.abs(ys - (c - 0.5 * Wc * g)) < 0.2
+            inl_r = np.abs(ys - (c + 0.5 * Wc * g)) < 0.2
+            X = np.concatenate([xs[inl_l], xs[inl_r]])
+            if len(X) < self.min_pixels or np.ptp(X) < 5.0:
+                self._since_track += 1
+                return []
+            Y = np.concatenate([ys[inl_l] + 0.5 * Wc * g[inl_l], ys[inl_r] - 0.5 * Wc * g[inl_r]])
+            if np.ptp(X) >= 9.0:
+                a, b, k = np.polyfit(X, Y, 2)[::-1]
+            else:                                            # short stretch seen: keep the curvature found by the search
+                b, a = np.polyfit(X, Y - k * X * X, 1)
+            if abs(a - a_grid_best) > 1.0:                    # refinement must not wander to another lane
+                self._since_track += 1
+                return []
+        nl, nr = int(inl_l.sum()), int(inl_r.sum())
+        if nl >= 150 and nr >= 150:                          # both edges well seen: learn the width
+            Xa = np.concatenate([xs[inl_l], xs[inl_r]])
+            ga = np.concatenate([g[inl_l], g[inl_r]])
+            A = np.column_stack([np.ones(nl + nr), Xa, Xa ** 2,
+                                 ga * np.concatenate([-0.5 * np.ones(nl), 0.5 * np.ones(nr)])])
+            yy = np.concatenate([ys[inl_l], ys[inl_r]])
+            sol = np.linalg.lstsq(A, yy, rcond=None)[0]
+            if 2.8 <= sol[3] <= 4.4:
+                self.width_est = 0.9 * self.width_est + 0.1 * float(sol[3])
+                a, b, k, Wc = sol[0], sol[1], sol[2], float(sol[3])
+        if abs(a) > self.max_abs_offset or abs(b) > 0.6:     # not a believable position/heading: do not remember it
+            self._since_track += 1
+            return []
+        if tracking and abs(a - self._m_prev[0]) > 1.5 * self.track_gate:
+            self._since_track += 1                           # a followed lane cannot jump: reject
+            return []
+        steady = (self._m_prev is not None and self._since_track <= self.track_max_gap
+                  and abs(a - self._m_prev[0]) <= (1.5 * self.track_gate if tracking else self.track_gate))
+        self._conf = self._conf + 1 if steady else 1
+        self._m_prev, self._since_track = (a, b), 0
+        self._support = (nl, nr)
+        return [np.array([k, b, a - Wc / 2]), np.array([k, b, a + Wc / 2])]
+
+    def reset_track(self):
+        """Forget the lane edges seen so far (use between unrelated images or after a teleport)."""
+        self._track, self._since_track, self._conf = None, 0, 0
+        self._m_prev = None
+
+    def _accept(self, edges, tracked):
+        """Remember the lane edges. A track is only FOLLOWED after track_confirm steady frames, so a
+        bad first reading (car just spawned, junction) cannot lock the detector onto a wrong lane."""
+        t = self._track
+        steady = (t is not None and self._since_track <= self.track_max_gap
+                  and abs(edges[0] - t[0]) <= self.track_gate and abs(edges[1] - t[1]) <= self.track_gate)
+        self._conf = self._conf + 1 if (tracked or steady) else 1
+        self._track, self._since_track = edges, 0
+
     def _choose(self, lines):
-        """The ego lane is bounded by the NEAREST marking on each side of the car: take the
-        narrowest left/right pair that is a plausible lane (2-6 m wide, roughly parallel).
-        Otherwise fall back to the single longest line. Returns 1-2 coeff arrays, or []."""
-        # (y at the car, coeffs, n inlier pixels, road length spanned in m)
-        cand = [(np.polyval(c, 0.0), c, len(ix), float(np.ptp(ix))) for c, ix, _ in lines]
+        """Pick the ego lane's markings from the candidate lines.
+
+        Tracking: the car cannot move sideways faster than a few cm per frame, so once the lane
+        edges are known (where they cut the car's own position), the next frame's edges must be
+        near them. Only lines within track_gate of the previous left / right edge are considered;
+        this stops a kerb, a shadow edge or a far dashed line from stealing the choice in a bend.
+        Without a recent track (start, or lost for a while) fall back to the nearest valid pair."""
+        cand = [(np.polyval(c, 0.0), c, len(ix), float(np.ptp(ix)), float(ix.min()), float(ix.max()))
+                for c, ix, _ in lines]
         cand = [t for t in cand if t[3] >= 6.0]              # must span at least 6 m of road
         lefts = [t for t in cand if t[0] < -0.3]
         rights = [t for t in cand if t[0] > 0.3]
+
+        if (self._track is not None and self._since_track <= self.track_max_gap
+                and self._conf >= self.track_confirm):
+            pl, pr = self._track
+            g = self.track_gate
+            def near(group, pred):
+                ok = [t for t in group if abs(t[0] - pred) <= g]
+                # strongest support wins; distance only breaks ties
+                return max(ok, key=lambda t: t[2] / (1.0 + ((t[0] - pred) / 0.3) ** 2)) if ok else None
+            L, R = near(lefts, pl), near(rights, pr)
+            if L is not None and R is not None and abs((R[0] - L[0]) - self.width_est) <= 2 * self.width_tol:
+                self._accept((L[0], R[0]), True)
+                return [L[1], R[1]]
+            if R is not None and (L is None or R[2] >= 2 * L[2]) and R[3] >= 8.0:
+                self._accept((R[0] - self.width_est, R[0]), True)
+                return [R[1]]
+            if L is not None and L[3] >= 8.0:
+                self._accept((L[0], L[0] + self.width_est), True)
+                return [L[1]]
+            self._since_track += 1
+            return []
+
         best, best_w = None, 1e9
         for l in lefts:
             for r in rights:
                 width = r[0] - l[0]
                 slope_diff = abs(np.polyval(np.polyder(r[1]), 0.0) - np.polyval(np.polyder(l[1]), 0.0))
-                if 2.0 <= width <= 6.0 and slope_diff < 0.12 and width < best_w:
-                    best, best_w = (l[1], r[1]), width
+                if abs(width - self.width_est) <= self.width_tol and slope_diff < 0.12 and width < best_w:
+                    best, best_w = (l, r), width
         if best is not None:
-            return list(best)
-        singles = [t for t in cand if t[3] >= 8.0]
+            self._accept((best[0][0], best[1][0]), False)
+            return [best[0][1], best[1][1]]
+        reach = self.width_est / 2.0 + self.max_abs_offset
+        singles = [t for t in cand if t[3] >= 8.0 and abs(t[0]) <= reach
+                   and abs(np.polyval(np.polyder(t[1]), 0.0)) <= 0.2]
         if singles:
-            return [max(singles, key=lambda t: t[2])[1]]
+            t = max(singles, key=lambda t: t[2])
+            w2 = self.width_est / 2.0
+            self._accept((t[0], t[0] + self.width_est) if t[0] < 0 else (t[0] - self.width_est, t[0]), False)
+            return [t[1]]
+        self._since_track += 1
         return []
 
     def detect(self, frame_bgr, want_debug=False):
@@ -193,10 +366,16 @@ class ClassicalLaneDetector:
             rows, cols = rows[::step], cols[::step]
         x, y = self.bev_to_ground(cols.astype(np.float64), rows.astype(np.float64))
 
-        lines = self._find_lines(x, y)
-        chosen = self._choose(lines)
+        if self.lane_model:
+            lines = []                                        # no per-line candidates in this mode
+            chosen = self._model_lines(x, y)
+        else:
+            lines = self._find_lines(x, y)
+            chosen = self._choose(lines)
 
         res = LaneResult(n_lines=len(chosen))
+        if self.lane_model and chosen:
+            res.n_lines = 1 if min(self._support) < 60 else 2
         if chosen:
             if len(chosen) == 2:
                 center = (chosen[0] + chosen[1]) / 2.0
@@ -215,7 +394,7 @@ class ClassicalLaneDetector:
                 res.lateral_offset, res.heading_error = off, hdg
                 res.lane_width = width
                 res.detected = True
-                if len(chosen) == 2 and 2.0 <= width <= 5.0:   # remember the measured lane width
+                if (not self.lane_model) and len(chosen) == 2 and 2.0 <= width <= 5.0:   # remember the measured lane width
                     self.width_est = width if not self._width_seen else 0.9 * self.width_est + 0.1 * width
                     self._width_seen = True
             else:
@@ -228,8 +407,9 @@ class ClassicalLaneDetector:
                 for xm in np.linspace(self.x_near, self.x_far, 40):
                     cv2.circle(dbg, (int((np.polyval(coeffs, xm) + self.y_half) / self.res),
                                      int((self.x_far - xm) / self.res)), 1, (255, 128, 0), -1)
+            x_draw = min(self.x_far, self.model_xmax) if self.lane_model else self.x_far
             for coeffs in chosen:                              # the ones actually used, red
-                for xm in np.linspace(self.x_near, self.x_far, 40):
+                for xm in np.linspace(self.x_near, x_draw, 40):
                     cv2.circle(dbg, (int((np.polyval(coeffs, xm) + self.y_half) / self.res),
                                      int((self.x_far - xm) / self.res)), 2, (0, 0, 255), -1)
             cv2.line(dbg, (self.bev_w // 2, 0), (self.bev_w // 2, self.bev_h), (255, 255, 0), 1)

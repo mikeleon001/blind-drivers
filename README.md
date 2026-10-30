@@ -48,9 +48,16 @@ Working end to end in CARLA (synchronous mode, 20 Hz):
 - With the lane offset taken from the CARLA map (ground truth), the PID holds the lane and
   recovers from a steering disturbance (see `control/README.md` for the gain comparison).
 - A classical OpenCV lane detector (`perception/classical_lane.py`) produces the offset
-  directly from the camera image, in meters. It follows straight roads in Town10HD but still
-  loses the lane near sharper curves and at junctions - this is the current work item.
-- Not started: CNN-based detector, hardware tests, multiple maps / weather sweeps.
+  directly from the camera image, in meters. It fits a curved lane model (position, heading,
+  curvature, width) and holds the lane through the sharp right bend in Town10HD (spawn 10) at
+  4 m/s: true deviation from the map lane center ~0.12 m RMSE over 30 s (4 of 4 runs on the final
+  code). At 8 m/s it also gets through the bend but fails later, at the junction ~150 m in,
+  where the right line splits into a turn pocket (known limitation, see `perception/README.md`).
+- A U-Net detector (`perception/unet_lane.py`, `--detector unet`) is available for comparison. It
+  is trained on TuSimple and is ~2x slower per frame than the classical detector (CPU).
+- Runs are scored against the CARLA map (`TRUE deviation` in the summary), not only against the
+  detector's own output, which reads 0 when the lane is lost.
+- Not started: hardware tests, multiple maps / weather sweeps.
 
 ## Getting Started
 
@@ -82,6 +89,10 @@ CARLA itself is not included in this repo (it's a large separate install) - see
    ```bash
    python simulation/run_lane_keeping.py --spawn 10                      # ground-truth lane offset
    python simulation/run_lane_keeping.py --spawn 10 --detector cv --save-debug 20   # OpenCV detector
+   python simulation/run_lane_keeping.py --spawn 10 --detector unet                 # U-Net detector (needs torch)
+   # settings used for the Town10HD bend results (see simulation/README.md):
+   python simulation/run_lane_keeping.py --spawn 10 --detector cv --duration 30 --speed 4 \
+       --kp 0.6 --ki 0.1 --kd 0.1 --kh 0.5 --smooth 0.5 --steer-rate 4
    ```
 5. Compare all runs: `python evaluation/compare_runs.py`
 

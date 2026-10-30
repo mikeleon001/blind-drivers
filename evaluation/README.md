@@ -37,6 +37,7 @@ python evaluation/compare_runs.py --out summary.csv  # also save the table
 | `kick_peak_m`, `kick_rec_s` | for runs with a steering kick: peak offset after the kick, and time from that peak back under 0.1 m |
 | `det_pct` | percentage of frames where a lane was detected |
 | `det_err_m` | RMSE between the logged offset and the map ground truth (0 for ground-truth runs, the detector's own error for `--detector cv`) |
+| `true_mean_m`, `true_max_m`, `true_rmse_m` | deviation from the map lane center using `gt_offset`, so lost frames are not counted as 0 (the detector logs 0 when it has lost the lane); trust these over `mean_m`/`rmse_m` for detector runs |
 | `width_err_m` | mean detected minus map lane width; far from 0 means the camera geometry is off |
 
 ## Synthetic test
