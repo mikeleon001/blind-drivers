@@ -16,6 +16,10 @@ Columns:
     det_pct          lane detection accuracy (% of frames where a lane was found)
     det_err_m        RMSE between the detector's offset and the map ground truth (gt_offset)
     width_err_m      mean (detected - map) lane width; far from 0 means the camera geometry is off
+    true_*_m         mean / max / RMSE of |gt_offset| over ALL frames: where the car really was
+                     relative to the map lane center. Unlike mean_m / max_m / rmse_m (which use the
+                     offset the detector reported, 0 while the lane is lost) these cannot be
+                     flattered by a detector that loses the lane. Blank for older runs.
 
 --skip N ignores the first N seconds of each run (the car starts from a standstill), so the
 numbers describe steady driving instead of the start-up transient.
@@ -37,7 +41,8 @@ from evaluation.metrics import summarize        # noqa: E402
 
 NAME_RE = re.compile(r"run_(?P<tag>.+?)_spawn(?P<spawn>\d+)_(?P<stamp>\d{8}_\d{6})\.csv$")
 COLUMNS = ["tag", "spawn", "stamp", "frames", "mean_m", "max_m", "rmse_m",
-           "events", "rec_s", "kick_peak_m", "kick_rec_s", "det_pct", "det_err_m", "width_err_m"]
+           "events", "rec_s", "kick_peak_m", "kick_rec_s", "det_pct", "det_err_m", "width_err_m",
+           "true_mean_m", "true_max_m", "true_rmse_m"]
 
 
 def width_error(records):
@@ -57,6 +62,14 @@ def detector_error(records):
     if not errs:
         return None
     return (sum(e * e for e in errs) / len(errs)) ** 0.5
+
+
+def true_deviation(records):
+    """(mean, max, RMSE) of |gt_offset| over all frames, or (None, None, None) for old runs."""
+    g = [abs(r["gt_offset"]) for r in records if "gt_offset" in r]
+    if not g:
+        return None, None, None
+    return sum(g) / len(g), max(g), (sum(x * x for x in g) / len(g)) ** 0.5
 
 
 def kick_response(records, window_s=3.0, recovery_threshold=0.1):
@@ -108,6 +121,7 @@ def main():
         d = s["deviation"]
         kp, kr = kick_response(records, recovery_threshold=args.rec)
         acc = s["detection_accuracy"]
+        tm, tx, tr = true_deviation(records)
         rows.append({
             "tag": tag, "spawn": spawn, "stamp": stamp, "frames": s["n_frames"],
             "mean_m": fmt(d["mean_m"]), "max_m": fmt(d["max_m"]), "rmse_m": fmt(d["rmse_m"]),
@@ -116,6 +130,7 @@ def main():
             "det_pct": "" if acc is None else f"{100 * acc:.1f}",
             "det_err_m": fmt(detector_error(records)),
             "width_err_m": fmt(width_error(records)),
+            "true_mean_m": fmt(tm), "true_max_m": fmt(tx), "true_rmse_m": fmt(tr),
         })
 
     if not rows:
